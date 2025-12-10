@@ -11,7 +11,7 @@ st.set_page_config(page_title="Daily To-Do List", layout="wide")
 
 USERS_FILE = "users.json"
 DEFAULT_USER_STRUCT = {"password": "", "tasks": [], "completed": []}
-REMINDER_EMAIL = "info.dusc@daffodilvarsity.edu.bd"
+NOTIFY_EMAIL = "info.dusc@daffodilvarsity.edu.bd"
 
 # ------------------ Helpers: load / save ------------------
 def ensure_file():
@@ -107,27 +107,25 @@ def inject_page_style():
     </style>
     """, unsafe_allow_html=True)
 
-# ------------------ Send reminder email ------------------
-def send_reminder_email(task_title, end_date):
-    sender_email = "your_email@gmail.com"
-    sender_pass = "your_app_password"
+# ------------------ Send Email ------------------
+def send_email(subject, body):
+    sender_email = "your_email@gmail.com"         # <--- তোমার gmail
+    sender_pass = "your_app_password"             # <--- App password
 
-    message = MIMEMultipart("alternative")
-    message["Subject"] = f"Pending Task Reminder: {task_title}"
-    message["From"] = sender_email
-    message["To"] = REMINDER_EMAIL
-
-    text = f"Reminder: Task '{task_title}' is still pending. Complete by {end_date}."
-    part1 = MIMEText(text, "plain")
-    message.attach(part1)
+    msg = MIMEMultipart()
+    msg['From'] = sender_email
+    msg['To'] = NOTIFY_EMAIL
+    msg['Subject'] = subject
+    msg.attach(MIMEText(body, 'plain'))
 
     try:
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
             server.login(sender_email, sender_pass)
-            server.sendmail(sender_email, REMINDER_EMAIL, message.as_string())
+            server.send_message(msg)
     except Exception as e:
-        print("Email send failed:", e)
+        print("Email sending failed:", e)
 
+# ------------------ Send pending reminders ------------------
 def send_pending_reminders():
     users = load_users()
     today = date.today()
@@ -135,7 +133,8 @@ def send_pending_reminders():
         for task in data.get("tasks", []):
             task_end = datetime.strptime(task["End"], "%Y-%m-%d").date()
             if task["Status"] != "Completed" and today <= task_end:
-                send_reminder_email(task["Task"], task["End"])
+                send_email(f"Pending Task Reminder: {task['Task']}",
+                           f"Task '{task['Task']}' is still pending. Complete by {task['End']}.")
 
 # ------------------ Login ------------------
 def login_page():
@@ -246,6 +245,9 @@ def task_list_page():
             users[username]["completed"].insert(0, task_obj)
             save_users(users)
             notify("Task moved to Completed","success")
+            # --- Send email for completed task ---
+            send_email(f"Task Completed: {task_obj['Task']}",
+                       f"Task '{task_obj['Task']}' has been completed by {username} at {task_obj['CompletedAt']}.")
             st.experimental_rerun()
         if c4.button("🏃 Running", key=f"run_{i}"):
             users = load_users()
@@ -253,33 +255,6 @@ def task_list_page():
             save_users(users)
             notify("Task set to Running","info")
             st.experimental_rerun()
-
-    # Edit form
-    if "edit_idx" in st.session_state and st.session_state.edit_idx is not None:
-        idx = st.session_state.edit_idx
-        if idx>=len(users[username]["tasks"]): st.session_state.edit_idx=None
-        else:
-            t = users[username]["tasks"][idx]
-            st.markdown("---")
-            st.subheader("✏️ Edit Task")
-            with st.form("edit_form"):
-                nt = st.text_input("Title", t.get("Task",""))
-                nd = st.text_area("Description", t.get("Description",""))
-                ns = st.date_input("Start", value=date.fromisoformat(t.get("Start","2025-01-01")))
-                ne = st.date_input("End", value=date.fromisoformat(t.get("End","2025-01-01")))
-                np = st.selectbox("Priority", ["High","Medium","Low"], index=["High","Medium","Low"].index(t.get("Priority","Low")))
-                na = st.text_input("Assigned By", t.get("AssignedBy",""))
-                sv = st.form_submit_button("Save Changes")
-                if sv:
-                    users[username]["tasks"][idx] = {
-                        "Task": nt, "Description": nd, "Start": str(ns), "End": str(ne),
-                        "Status": t.get("Status","Pending"), "Priority": np,
-                        "AssignedBy": na, "Created": t.get("Created", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-                    }
-                    save_users(users)
-                    notify("Task updated","success")
-                    st.session_state.edit_idx=None
-                    st.experimental_rerun()
 
 # ------------------ Completed Tasks ------------------
 def completed_page():
@@ -354,7 +329,7 @@ def main():
     elif menu_choice=="CSV Export": csv_page()
     elif menu_choice=="Change Password": password_page()
 
-    # Send pending reminders (can be commented if not needed)
+    # Send pending reminders
     send_pending_reminders()
 
 if __name__=="__main__":
