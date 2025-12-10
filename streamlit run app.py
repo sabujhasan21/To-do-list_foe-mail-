@@ -2,7 +2,10 @@
 import streamlit as st
 import pandas as pd
 from datetime import date, datetime
-import json, os
+import json
+import os
+import threading
+import time
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -11,9 +14,12 @@ st.set_page_config(page_title="Daily To-Do List", layout="wide")
 
 USERS_FILE = "users.json"
 DEFAULT_USER_STRUCT = {"password": "", "tasks": [], "completed": []}
-NOTIFY_EMAIL = "info.dusc@daffodilvarsity.edu.bd"
 
-# ------------------ Helpers: load / save ------------------
+EMAIL_USER = "your_email@gmail.com"        # sender email
+EMAIL_PASS = "your_app_password"           # app password
+EMAIL_TO = "info.dusc@daffodilvarsity.edu.bd"
+
+# ------------------ Helpers ------------------
 def ensure_file():
     if not os.path.exists(USERS_FILE):
         with open(USERS_FILE, "w") as f:
@@ -41,7 +47,6 @@ def save_users(users):
     with open(USERS_FILE, "w") as f:
         json.dump(users, f, indent=4)
 
-# ------------------ Notification popup ------------------
 def notify(message, kind="success"):
     color = {
         "success": "#2E7D32",
@@ -82,7 +87,6 @@ def notify(message, kind="success"):
     """
     st.markdown(html, unsafe_allow_html=True)
 
-# ------------------ CSS ------------------
 def inject_page_style():
     st.markdown("""
     <style>
@@ -107,36 +111,33 @@ def inject_page_style():
     </style>
     """, unsafe_allow_html=True)
 
-# ------------------ Send Email ------------------
+# ------------------ Email Sending ------------------
 def send_email(subject, body):
-    sender_email = "your_email@gmail.com"         # <--- তোমার gmail
-    sender_pass = "your_app_password"             # <--- App password
-
-    msg = MIMEMultipart()
-    msg['From'] = sender_email
-    msg['To'] = NOTIFY_EMAIL
-    msg['Subject'] = subject
-    msg.attach(MIMEText(body, 'plain'))
-
     try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(sender_email, sender_pass)
-            server.send_message(msg)
+        msg = MIMEMultipart()
+        msg['From'] = EMAIL_USER
+        msg['To'] = EMAIL_TO
+        msg['Subject'] = subject
+        msg.attach(MIMEText(body, 'html'))
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()
+        server.login(EMAIL_USER, EMAIL_PASS)
+        server.send_message(msg)
+        server.quit()
     except Exception as e:
-        print("Email sending failed:", e)
+        print("Email send failed:", e)
 
-# ------------------ Send pending reminders ------------------
 def send_pending_reminders():
     users = load_users()
-    today = date.today()
-    for uname, data in users.items():
+    today_str = date.today().strftime("%Y-%m-%d")
+    for username, data in users.items():
         for task in data.get("tasks", []):
-            task_end = datetime.strptime(task["End"], "%Y-%m-%d").date()
-            if task["Status"] != "Completed" and today <= task_end:
-                send_email(f"Pending Task Reminder: {task['Task']}",
-                           f"Task '{task['Task']}' is still pending. Complete by {task['End']}.")
+            if task["Status"] != "Completed" and task["End"] >= today_str:
+                subject = f"Pending Task Reminder: {task['Task']}"
+                body = f"Task: {task['Task']}<br>Description: {task['Description']}<br>End: {task['End']}"
+                send_email(subject, body)
 
-# ------------------ Login ------------------
+# ------------------ Login Page ------------------
 def login_page():
     st.title("🔐 Daily To-Do List — Login")
     users = load_users()
@@ -145,36 +146,38 @@ def login_page():
         username = st.text_input("Username", key="login_user")
         password = st.text_input("Password", type="password", key="login_pwd")
         if st.button("Login", use_container_width=True):
-            if username in users and users[username]["password"]==password:
+            if username in users and users[username]["password"] == password:
                 st.session_state.logged = True
                 st.session_state.user = username
-                notify("Login successful", "success")
-                st.rerun()
+                notify("Login successful","success")
+                st.experimental_rerun()
             else:
-                notify("Invalid username or password", "error")
-    with col2: st.write("")
+                notify("Invalid username or password","error")
+    with col2:
+        st.write("")
     st.markdown("---")
     st.subheader("Create new account")
     new_user = st.text_input("New username", key="new_user")
     new_pass = st.text_input("New password", type="password", key="new_pass")
     if st.button("Create account", use_container_width=True):
         users = load_users()
-        if not new_user.strip():
-            notify("Username cannot be empty", "error")
+        if not new_user:
+            notify("Username cannot be empty","error")
         elif new_user in users:
-            notify("User already exists", "warning")
+            notify("User already exists","warning")
         else:
             users[new_user] = DEFAULT_USER_STRUCT.copy()
             users[new_user]["password"] = new_pass
             save_users(users)
-            notify("Account created — now login", "success")
+            notify("Account created — you can now login","success")
 
 # ------------------ Add Task ------------------
 def add_task_page():
     inject_page_style()
     users = load_users()
     username = st.session_state.user
-    tasks = users[username].get("tasks", [])
+    if "tasks" not in users[username]: users[username]["tasks"]=[]
+    save_users(users)
 
     st.header("➕ Add New Task")
     with st.form("add_form", clear_on_submit=True):
@@ -209,45 +212,48 @@ def task_list_page():
     inject_page_style()
     users = load_users()
     username = st.session_state.user
-    tasks = users[username].get("tasks", [])
-    completed = users[username].get("completed", [])
+    tasks = users[username].get("tasks",[])
+    if "completed" not in users[username]: users[username]["completed"]=[]
+    save_users(users)
+
     st.header("📝 Active Tasks")
-    if not tasks: st.info("No active tasks"); return
+    if not tasks:
+        st.info("No active tasks. Add one from 'Add Task'.")
+        return
 
     for i, t in enumerate(tasks):
-        pcolor = {"High":"🔴 Red", "Medium":"🟠 Orange", "Low":"🟢 Green"}[t.get("Priority","Low")]
+        pcolor = {"High":"🔴 Red","Medium":"🟠 Orange","Low":"🟢 Green"}[t.get("Priority","Low")]
         scolor = "blue" if t.get("Status")=="Running" else "orange"
-
-        st.markdown(f"<div class='task-card'>", unsafe_allow_html=True)
-        st.markdown(f"<div class='task-title'>{t.get('Task','')}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='task-card'>",unsafe_allow_html=True)
+        st.markdown(f"<div class='task-title'>{t.get('Task','')}</div>",unsafe_allow_html=True)
         st.markdown(f"<div class='task-info'>{t.get('Description','')}<br>"
                     f"Start: {t.get('Start','')} | End: {t.get('End','')}<br>"
                     f"<b>Status:</b> <span style='color:{scolor}'>{t.get('Status')}</span> | "
                     f"<b>Priority:</b> {pcolor} | "
-                    f"<b>Assigned By:</b> {t.get('AssignedBy','-')}</div>", unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
+                    f"<b>Assigned By:</b> {t.get('AssignedBy','-')}</div>",unsafe_allow_html=True)
+        st.markdown("</div>",unsafe_allow_html=True)
 
         c1,c2,c3,c4 = st.columns(4)
         if c1.button("✏️ Edit", key=f"edit_{i}"):
-            st.session_state.edit_idx = i
+            st.session_state.edit_idx=i
             st.experimental_rerun()
         if c2.button("🗑 Delete", key=f"del_{i}"):
             users = load_users()
             users[username]["tasks"].pop(i)
             save_users(users)
-            notify("Task deleted", "warning")
+            notify("Task deleted","warning")
             st.experimental_rerun()
         if c3.button("✔ Complete", key=f"comp_{i}"):
             users = load_users()
             task_obj = users[username]["tasks"].pop(i)
             task_obj["Status"]="Completed"
             task_obj["CompletedAt"]=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            users[username]["completed"].insert(0, task_obj)
+            users[username]["completed"].insert(0,task_obj)
             save_users(users)
             notify("Task moved to Completed","success")
-            # --- Send email for completed task ---
-            send_email(f"Task Completed: {task_obj['Task']}",
-                       f"Task '{task_obj['Task']}' has been completed by {username} at {task_obj['CompletedAt']}.")
+            subject=f"Task Completed: {task_obj['Task']}"
+            body=f"Task '{task_obj['Task']}' completed successfully."
+            send_email(subject,body)
             st.experimental_rerun()
         if c4.button("🏃 Running", key=f"run_{i}"):
             users = load_users()
@@ -256,59 +262,110 @@ def task_list_page():
             notify("Task set to Running","info")
             st.experimental_rerun()
 
+    # Edit form
+    if "edit_idx" in st.session_state and st.session_state.edit_idx is not None:
+        idx=st.session_state.edit_idx
+        if idx>=len(users[username]["tasks"]):
+            st.session_state.edit_idx=None
+        else:
+            t=users[username]["tasks"][idx]
+            st.markdown("---")
+            st.subheader("✏️ Edit Task")
+            with st.form("edit_form"):
+                nt=st.text_input("Title",t.get("Task",""))
+                nd=st.text_area("Description",t.get("Description",""))
+                ns=st.date_input("Start",value=date.fromisoformat(t.get("Start","2025-01-01")))
+                ne=st.date_input("End",value=date.fromisoformat(t.get("End","2025-01-01")))
+                np=st.selectbox("Priority",["High","Medium","Low"],index=["High","Medium","Low"].index(t.get("Priority","Low")))
+                na=st.text_input("Assigned By",t.get("AssignedBy",""))
+                sv=st.form_submit_button("Save Changes")
+                if sv:
+                    users[username]["tasks"][idx]={
+                        "Task":nt,
+                        "Description":nd,
+                        "Start":str(ns),
+                        "End":str(ne),
+                        "Status":t.get("Status","Pending"),
+                        "Priority":np,
+                        "AssignedBy":na,
+                        "Created":t.get("Created",datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                    }
+                    save_users(users)
+                    notify("Task updated","success")
+                    st.session_state.edit_idx=None
+                    st.experimental_rerun()
+
 # ------------------ Completed Tasks ------------------
 def completed_page():
     inject_page_style()
     users = load_users()
     username = st.session_state.user
-    completed = users[username].get("completed", [])
+    completed = users[username].get("completed",[])
     st.header("✅ Completed Tasks")
-    if not completed: st.info("No completed tasks yet."); return
+    if not completed:
+        st.info("No completed tasks yet.")
+        return
     for t in completed:
-        st.markdown("<div class='task-card'>", unsafe_allow_html=True)
-        st.markdown(f"<div class='task-title'>✅ {t.get('Task')}</div>", unsafe_allow_html=True)
+        st.markdown("<div class='task-card'>",unsafe_allow_html=True)
+        st.markdown(f"<div class='task-title'>✅ {t.get('Task')}</div>",unsafe_allow_html=True)
         st.markdown(f"<div class='task-info'>{t.get('Description','')}<br>"
                     f"Completed at: {t.get('CompletedAt','-')}<br>"
-                    f"Priority: {t.get('Priority','-')} | Assigned By: {t.get('AssignedBy','-')}</div>", unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
+                    f"Priority: {t.get('Priority','-')} | Assigned By: {t.get('AssignedBy','-')}</div>",unsafe_allow_html=True)
+        st.markdown("</div>",unsafe_allow_html=True)
 
 # ------------------ CSV Export ------------------
 def csv_page():
-    users = load_users()
-    username = st.session_state.user
-    tasks = users[username].get("tasks", []) + users[username].get("completed", [])
-    st.header("⬇ Export Tasks")
-    if not tasks: st.info("No tasks"); return
-    start = st.date_input("Start Date", date.today())
-    end = st.date_input("End Date", date.today())
-    filtered = [t for t in tasks if start <= date.fromisoformat(t["Start"]) <= end]
-    if not filtered: st.info("No tasks in this range"); return
-    df = pd.DataFrame(filtered)
-    st.download_button("Download CSV", df.to_csv(index=False), "tasks.csv")
+    inject_page_style()
+    users=load_users()
+    username=st.session_state.user
+    tasks=users[username].get("tasks",[])+users[username].get("completed",[])
+    st.header("⬇ Export Tasks to CSV")
+    if not tasks:
+        st.warning("No tasks to export")
+        return
+    start=st.date_input("Start Date",date.today())
+    end=st.date_input("End Date",date.today())
+    filtered=[t for t in tasks if start<=date.fromisoformat(t["Start"])<=end]
+    if not filtered:
+        st.info("No tasks in selected date range")
+        return
+    df=pd.DataFrame(filtered)
+    st.download_button("Download CSV",df.to_csv(index=False),file_name="tasks.csv")
 
 # ------------------ Password ------------------
 def password_page():
-    users = load_users()
-    username = st.session_state.user
+    inject_page_style()
+    users=load_users()
+    username=st.session_state.user
     st.header("🔑 Change Password")
-    old = st.text_input("Old Password", type="password")
-    new = st.text_input("New Password", type="password")
-    c = st.text_input("Confirm New Password", type="password")
+    old=st.text_input("Old Password",type="password")
+    new=st.text_input("New Password",type="password")
+    c=st.text_input("Confirm New Password",type="password")
     if st.button("Update"):
-        if users[username]["password"] != old:
+        if users[username]["password"]!=old:
             notify("Old password incorrect","error")
-        elif new != c:
+        elif new!=c:
             notify("Passwords do not match","error")
         else:
             users[username]["password"]=new
             save_users(users)
             notify("Password updated","success")
 
+# ------------------ Background Reminder Thread ------------------
+def auto_task_mail():
+    while True:
+        send_pending_reminders()
+        time.sleep(3600) # এক ঘণ্টা পর পর
+
 # ------------------ Main ------------------
 def main():
     if "logged" not in st.session_state: st.session_state.logged=False
     if "user" not in st.session_state: st.session_state.user=None
     if "edit_idx" not in st.session_state: st.session_state.edit_idx=None
+    if "thread_started" not in st.session_state:
+        st.session_state.thread_started=True
+        t=threading.Thread(target=auto_task_mail,daemon=True)
+        t.start()
 
     if not st.session_state.logged:
         login_page()
@@ -316,7 +373,7 @@ def main():
 
     inject_page_style()
     st.sidebar.title("📌 Menu")
-    menu_choice = st.sidebar.radio("", ["Add Task","Active Tasks","Completed Tasks","CSV Export","Change Password"])
+    menu_choice=st.sidebar.radio("", ["Add Task","Active Tasks","Completed Tasks","CSV Export","Change Password"])
     if st.sidebar.button("Logout"):
         st.session_state.logged=False
         st.session_state.user=None
@@ -328,9 +385,6 @@ def main():
     elif menu_choice=="Completed Tasks": completed_page()
     elif menu_choice=="CSV Export": csv_page()
     elif menu_choice=="Change Password": password_page()
-
-    # Send pending reminders
-    send_pending_reminders()
 
 if __name__=="__main__":
     main()
